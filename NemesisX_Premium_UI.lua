@@ -1,4 +1,3 @@
-cat > /mnt/user-data/outputs/NemesisX_Premium_UI.lua << 'ENDOFSCRIPT'
 -- ==========================================================
 -- NEMESIS X PREMIUM EDITION — UI ONLY
 -- Based on Sacred UI by CursedExility
