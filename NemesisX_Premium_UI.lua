@@ -1198,5 +1198,3 @@ addSliderElement(perfCard, "UI Scale", 50, 150, 100, 0)
 switchTab("Home")
 
 print("[Nemesis X Premium] UI Loaded | 70+ Features | by CursedExility")
-ENDOFSCRIPT
-echo "Done! Lines: $(wc -l < /mnt/user-data/outputs/NemesisX_Premium_UI.lua)"
