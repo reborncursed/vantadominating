@@ -1,0 +1,22 @@
+[
+    {
+       "label":"String Encryption",
+       "description":"StringEncryption",
+       "detail":"Secures your strings, doesn't cause performance loss"
+    },
+    {
+       "label":"Constant Encryption",
+       "description":"ConstantEncryption",
+       "detail":"Encrypts constants in the bytecode"
+    },
+    {
+       "label":"Anti Dump",
+       "description":"AntiDump",
+       "detail":"Stops common constant dumping methods. (Works on executors only)"
+    },
+    {
+       "label":"Small Output",
+       "description":"SmallOutput",
+       "detail":"Gives super minified output - this might decrease security"
+    }
+ ]
