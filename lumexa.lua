@@ -1398,7 +1398,7 @@ local Tabs = {
 
 Tabs.Info:AddSection("Join the Community")
 
-local DiscordLink = ""
+local DiscordLink = "https://discord.gg/8rz6u37Pac"
 local WhatsAppLink = "https://chat.whatsapp.com/GffRG58XqEx8SL3PjxHy6v"
 
 Tabs.Info:AddButton({
