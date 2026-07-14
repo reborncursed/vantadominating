@@ -1351,7 +1351,7 @@ task.spawn(function()
     local overlay = MobileButton:FindFirstChild("AuroraIcon")
     if not overlay then
       overlay = Instance.new("ImageLabel")
-      overlay.Name = "AuroraIcon"
+      overlay.Name = "LumexaIcon"
       overlay.Parent = MobileButton
       overlay.AnchorPoint = Vector2.new(0.5, 0.5)
       overlay.Position = UDim2.fromScale(0.5, 0.5)
@@ -1370,7 +1370,7 @@ task.spawn(function()
   while MobileButton and MobileButton.Parent do
     applyMobileIcon(MobileButton)
     for _, child in ipairs(MobileButton:GetDescendants()) do
-      if child.Name ~= "AuroraIcon" then
+      if child.Name ~= "LumexaIcon" then
         applyMobileIcon(child)
       end
     end
