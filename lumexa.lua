@@ -1315,8 +1315,8 @@ end
 
 local redzlib = loadstring(game:HttpGet("https://raw.githubusercontent.com/tlredz/Library/refs/heads/main/redz-V5-remake/main.luau"))()
 local Window = redzlib:MakeWindow({
-    Title = "Aurora X : Blox Fruit",
-    SubTitle = "by @emii.naty",
+    Title = "Lumexa : Blox Fruit",
+    SubTitle = "by @vantaorbureu",
     SaveFolder = "oknaiget.json"
 })
 
