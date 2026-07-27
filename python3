@@ -1,0 +1,906 @@
+#!/usr/bin/env python3
+"""
+Lua Static Analysis & Deobfuscation Engine
+Targets: MoonSec V2/V3, Luraph (LPH), Moonveil
+4-Layer Architecture | Zero External Dependencies | Fully Local
+"""
+import re
+import sys
+import math
+import json
+from typing import Dict, List, Tuple, Optional, Any
+from collections import OrderedDict
+
+# ======================================================================
+# LAYER 0: CORE UTILITIES
+# ======================================================================
+
+class Logger:
+    """Simple logger to track engine operation."""
+    def __init__(self):
+        self.logs: List[str] = []
+    
+    def info(self, msg: str) -> None:
+        self.logs.append(f"[INFO] {msg}")
+    
+    def warn(self, msg: str) -> None:
+        self.logs.append(f"[WARN] {msg}")
+    
+    def error(self, msg: str) -> None:
+        self.logs.append(f"[ERROR] {msg}")
+    
+    def get_all(self) -> str:
+        return "\n".join(self.logs)
+
+
+# ======================================================================
+# LAYER 1: IDENTIFICATION & SIGNATURE DETECTION
+# ======================================================================
+
+class Layer1Identifier:
+    """
+    Structural scanner that reads raw input and detects protector signatures.
+    Uses heuristic scoring across three protector families.
+    """
+    
+    @staticmethod
+    def identify(source: str) -> Dict[str, Any]:
+        """
+        Scan source code for protector signatures.
+        
+        Args:
+            source: Raw Lua script source
+            
+        Returns:
+            Dict with protector name, confidence score, and detailed breakdown
+        """
+        result = {
+            'protector': 'Unknown',
+            'confidence': 0,
+            'details': {
+                'luraph': {'score': 0, 'indicators': []},
+                'moonsec': {'score': 0, 'indicators': []},
+                'moonveil': {'score': 0, 'indicators': []},
+            }
+        }
+        
+        if not source or len(source) < 10:
+            return result
+        
+        # --- Luraph (LPH) Signatures ---
+        # Global LPH_0 through LPH_n constant declarations
+        lph_globals = len(re.findall(r'LPH_\d+\s*=', source))
+        if lph_globals > 3:
+            result['details']['luraph']['score'] += 25
+            result['details']['luraph']['indicators'].append(
+                f"LPH_ globals: {lph_globals}"
+            )
+        
+        # Luraph string allocation blocks: LPH_X = string.byte/char
+        lph_aliases = len(re.findall(
+            r'LPH_\d+\s*=\s*string\.(?:byte|char|sub|len)\b', source
+        ))
+        if lph_aliases > 2:
+            result['details']['luraph']['score'] += 20
+            result['details']['luraph']['indicators'].append(
+                f"string.* aliased via LPH_: {lph_aliases}"
+            )
+        
+        # Bitwise translation headers
+        lph_bitwise = len(re.findall(r'bit\.?[a-z]+', source, re.I))
+        lph_arith = len(re.findall(
+            r'LPH_\d+\s*=\s*\d+\s*\+\s*LPH_\d+', source
+        ))
+        if lph_bitwise + lph_arith > 5:
+            result['details']['luraph']['score'] += 15
+            result['details']['luraph']['indicators'].append(
+                "Bitwise/arithmetic translation patterns"
+            )
+        
+        # table.concat byte reconstruction
+        lph_concat = len(re.findall(
+            r'table\.concat\s*\([^)]*byte[^)]*\)', source, re.I
+        ))
+        if lph_concat > 0:
+            result['details']['luraph']['score'] += 15
+            result['details']['luraph']['indicators'].append(
+                "table.concat byte reconstruction"
+            )
+        
+        # --- MoonSec Signatures ---
+        # Hex variable chains (_0x followed by hex digits)
+        hex_vars = re.findall(r'_0x[0-9a-fA-F]{2,8}', source)
+        if len(hex_vars) > 5:
+            result['details']['moonsec']['score'] += 25
+            result['details']['moonsec']['indicators'].append(
+                f"Hex variable chain: {len(hex_vars)} vars"
+            )
+        
+        # Massive string.byte or string.char inline arrays
+        sb_count = len(re.findall(r'string\.byte\s*\(', source))
+        sc_count = len(re.findall(r'string\.char\s*\(', source))
+        if sb_count > 20 or sc_count > 20:
+            result['details']['moonsec']['score'] += 20
+            result['details']['moonsec']['indicators'].append(
+                f"string.byte({sb_count}) / string.char({sc_count}) arrays"
+            )
+        
+        # Prometheus-type localized macro wrappers
+        prom_macros = len(re.findall(r'local\s+_\w+\s*=\s*string\.', source))
+        if prom_macros > 3:
+            result['details']['moonsec']['score'] += 15
+            result['details']['moonsec']['indicators'].append(
+                "Prometheus-style localized macros"
+            )
+        
+        # IIFE chains for decryption
+        iife_count = len(re.findall(r'\(\(function\(\)', source))
+        iife_end = len(re.findall(r'end\)\(\)', source))
+        if iife_count + iife_end > 10:
+            result['details']['moonsec']['score'] += 10
+            result['details']['moonsec']['indicators'].append(
+                "IIFE chains for decryption"
+            )
+        
+        # --- Moonveil Signatures ---
+        # Massive if-elseif dispatch chains
+        if_chains = re.findall(
+            r'(?:if\s+.*?==\s*\d+\s*then[\s\S]*?elseif\s+.*?==\s*\d+\s*then){5,}',
+            source
+        )
+        if if_chains:
+            result['details']['moonveil']['score'] += 30
+            result['details']['moonveil']['indicators'].append(
+                "Massive if-elseif dispatch chain"
+            )
+        
+        # Dispatch table entries
+        dispatch_count = len(re.findall(
+            r'\[\s*\d+\s*\]\s*=\s*function\s*\(', source
+        ))
+        if dispatch_count > 5:
+            result['details']['moonveil']['score'] += 20
+            result['details']['moonveil']['indicators'].append(
+                f"Dispatch table entries: {dispatch_count}"
+            )
+        
+        # State variable arithmetic tracking
+        state_arith = len(re.findall(r'(\w+)\s*=\s*\1\s*\+\s*\d+', source))
+        if state_arith > 8:
+            result['details']['moonveil']['score'] += 15
+            result['details']['moonveil']['indicators'].append(
+                "State variable arithmetic tracking"
+            )
+        
+        # Garbage table injection detection
+        garbage_tables = len(re.findall(
+            r"""\[\s*['"][\w]+['"]\s*\]\s*=\s*\{[^}]*\{[^}]*\}[^}]*\}""",
+            source
+        ))
+        if garbage_tables > 3:
+            result['details']['moonveil']['score'] += 10
+            result['details']['moonveil']['indicators'].append(
+                "Garbage table injection detected"
+            )
+        
+        # --- Final Scoring ---
+        scores = {
+            'Luraph': result['details']['luraph']['score'],
+            'MoonSec': result['details']['moonsec']['score'],
+            'Moonveil': result['details']['moonveil']['score'],
+        }
+        
+        max_score = max(scores.values())
+        if max_score >= 25:
+            winner = max(scores, key=scores.get)
+            result['protector'] = winner
+            result['confidence'] = min(round((max_score / 90) * 100), 95)
+        
+        return result
+
+
+# ======================================================================
+# LAYER 2: DESERIALIZATION & CONSTANT RESTORATION
+# ======================================================================
+
+class Layer2Deserializer:
+    """
+    Extracts and simulates decryption of virtual machine constant tables.
+    Targets encrypted strings, integers, and boolean parameters hidden
+    within obfuscated byte arrays.
+    """
+    
+    @staticmethod
+    def deserialize(source: str, identification: Dict) -> Dict[str, Any]:
+        """
+        Run protector-specific deserialization.
+        
+        Args:
+            source: Raw Lua source
+            identification: Result from Layer 1
+            
+        Returns:
+            Dict with modified source, constants map, and count
+        """
+        result = {
+            'source': source,
+            'constants': {},
+            'restored': 0,
+            'error': None
+        }
+        
+        try:
+            protector = identification.get('protector', 'Unknown')
+            
+            if protector == 'Luraph':
+                result = Layer2Deserializer._deserialize_luraph(source)
+            elif protector == 'MoonSec':
+                result = Layer2Deserializer._deserialize_moonsec(source)
+            elif protector == 'Moonveil':
+                result = Layer2Deserializer._deserialize_moonveil(source)
+            else:
+                result = Layer2Deserializer._deserialize_generic(source)
+                
+        except Exception as e:
+            result['error'] = str(e)
+            result['source'] = source
+        
+        return result
+    
+    @staticmethod
+    def _try_xor_decrypt(bytes_list: List[int]) -> Optional[str]:
+        """Try XOR decryption with common keys."""
+        if not bytes_list:
+            return None
+        
+        # Try single-byte XOR keys
+        for key in range(256):
+            try:
+                decoded = bytes([b ^ key for b in bytes_list])
+                decoded_str = decoded.decode('latin-1')
+                # Check if result is readable text
+                if (re.match(r'^[a-zA-Z0-9_\s\.\,\;\:\!\?\-\+\/\*\(\)\[\]\{\}\'\"]+$', 
+                           decoded_str) and len(decoded_str) > 2):
+                    return decoded_str
+            except:
+                continue
+        
+        # Try XOR with incrementing key (position-based)
+        try:
+            decoded = bytes([b ^ (i % 256) for i, b in enumerate(bytes_list)])
+            decoded_str = decoded.decode('latin-1')
+            if re.match(r'^[a-zA-Z0-9_\s\.]+$', decoded_str) and len(decoded_str) > 2:
+                return decoded_str
+        except:
+            pass
+        
+        return None
+    
+    @staticmethod
+    def _extract_bytes(byte_str: str) -> List[int]:
+        """Extract integer bytes from a Lua array string."""
+        bytes_list = []
+        for part in byte_str.split(','):
+            part = part.strip()
+            if not part:
+                continue
+            # Handle inline calculations like 123+45
+            if '+' in part or '-' in part:
+                try:
+                    val = eval(part)
+                    bytes_list.append(int(val))
+                except:
+                    continue
+            else:
+                try:
+                    bytes_list.append(int(part))
+                except:
+                    continue
+        return [b for b in bytes_list if 0 <= b <= 255]
+    
+    @staticmethod
+    def _deserialize_luraph(source: str) -> Dict[str, Any]:
+        """Luraph constant decryption simulation."""
+        constants = {}
+        restored = 0
+        modified = source
+        
+        # Pattern 1: Extract LPH encrypted byte arrays
+        # local LPH_X = {byte1, byte2, ...}
+        pattern = re.compile(r'local\s+(LPH_\d+)\s*=\s*\{([^}]+)\}')
+        for match in pattern.finditer(source):
+            var_name = match.group(1)
+            bytes_list = Layer2Deserializer._extract_bytes(match.group(2))
+            
+            if len(bytes_list) > 2:
+                decrypted = Layer2Deserializer._try_xor_decrypt(bytes_list)
+                if decrypted:
+                    constants[var_name] = decrypted
+                    restored += 1
+                    # Replace references in source
+                    modified = re.sub(
+                        re.escape(var_name),
+                        f'"{decrypted}"',
+                        modified
+                    )
+        
+        # Pattern 2: table.concat byte reconstruction
+        concat_pattern = re.compile(r'table\.concat\s*\(\s*\{([^}]+)\}\s*\)')
+        for match in concat_pattern.finditer(source):
+            bytes_list = Layer2Deserializer._extract_bytes(match.group(1))
+            printable = [b for b in bytes_list if 32 <= b <= 126]
+            if len(printable) > 3:
+                try:
+                    decoded = bytes(printable).decode('latin-1')
+                    constants[f'concat_{restored}'] = decoded
+                    restored += 1
+                except:
+                    pass
+        
+        return {'source': modified, 'constants': constants, 'restored': restored, 'error': None}
+    
+    @staticmethod
+    def _deserialize_moonsec(source: str) -> Dict[str, Any]:
+        """MoonSec constant decryption simulation."""
+        constants = {}
+        restored = 0
+        modified = source
+        
+        # Pattern 1: Extract hex variable initializations
+        hex_vars = {}
+        for match in re.finditer(r'_0x([0-9a-fA-F]+)\s*=\s*(\d+)', source):
+            hex_vars[f'_0x{match.group(1)}'] = int(match.group(2))
+        
+        # Pattern 2: Extract string.byte inline arrays
+        byte_array_pattern = re.compile(r'\{([^}]*string\.byte[^}]*)\}')
+        for match in byte_array_pattern.finditer(source):
+            try:
+                inner = match.group(1)
+                nums = re.findall(r'\d+', inner)
+                if len(nums) > 2:
+                    bytes_list = [int(n) for n in nums if 32 <= int(n) <= 126]
+                    if len(bytes_list) > 2:
+                        # Try XOR with keys from hex vars
+                        keys = list(hex_vars.values())[:5] or [0, 1, 2]
+                        for key in keys:
+                            try:
+                                decoded = bytes([b ^ ((key + i) % 256) 
+                                                for i, b in enumerate(bytes_list)])
+                                decoded_str = decoded.decode('latin-1')
+                                clean = ''.join(c for c in decoded_str 
+                                              if 32 <= ord(c) <= 126)
+                                if (len(clean) > 3 and 
+                                    re.match(r'^[a-zA-Z0-9_\-\s\.]+$', clean)):
+                                    constants[f'moonsec_{restored}'] = clean
+                                    restored += 1
+                                    break
+                            except:
+                                continue
+            except:
+                continue
+        
+        # Pattern 3: Prometheus-style IIFE string wrappers
+        iife_pattern = re.compile(
+            r'\(function\s*\([^)]*\)[\s\S]*?end\)\([^)]*\)'
+        )
+        for match in iife_pattern.finditer(source):
+            block = match.group(0)
+            for cm in re.finditer(r'string\.char\s*\(([^)]+)\)', block):
+                args = re.findall(r'\d+', cm.group(1))
+                if len(args) > 2:
+                    bytes_list = [int(a) for a in args if 32 <= int(a) <= 126]
+                    if len(bytes_list) > 2:
+                        try:
+                            decoded = bytes(bytes_list).decode('latin-1')
+                            constants[f'prometheus_{restored}'] = decoded
+                            restored += 1
+                        except:
+                            continue
+        
+        return {'source': modified, 'constants': constants, 'restored': restored, 'error': None}
+    
+    @staticmethod
+    def _deserialize_moonveil(source: str) -> Dict[str, Any]:
+        """Moonveil constant deserialization."""
+        constants = {}
+        restored = 0
+        modified = source
+        
+        # Pattern 1: Extract dispatch table string entries
+        for match in re.finditer(
+            r"""\[\s*(\d+)\s*\]\s*=\s*['"]([^'"]+)['"]""", source
+        ):
+            key = int(match.group(1))
+            val = match.group(2)
+            if len(val) > 2:
+                constants[f'dispatch_{key}'] = val
+                restored += 1
+        
+        # Pattern 2: Extract encrypted payloads from nested tables
+        for match in re.finditer(
+            r"""\{['"]([^'"]+)['"]\s*=\s*\{([^}]+)\}\}""", source
+        ):
+            try:
+                key = match.group(1)
+                val_content = match.group(2)
+                nums = re.findall(r'\d+', val_content)
+                if len(nums) > 2:
+                    bytes_list = [int(n) for n in nums if 32 <= int(n) <= 126]
+                    if len(bytes_list) > 2:
+                        decoded = bytes(bytes_list).decode('latin-1')
+                        constants[key] = decoded
+                        restored += 1
+                        modified = modified.replace(
+                            match.group(0),
+                            f'{{["{key}"]="{decoded}"}}'
+                        )
+            except:
+                continue
+        
+        # Pattern 3: string.char code construction
+        for match in re.finditer(
+            r'string\.char\s*\(\s*(\d+(?:\s*,\s*\d+)+)\s*\)', source
+        ):
+            try:
+                bytes_list = [int(n.strip()) for n in match.group(1).split(',')
+                             if 32 <= int(n.strip()) <= 126]
+                if len(bytes_list) > 2:
+                    decoded = bytes(bytes_list).decode('latin-1')
+                    constants[f'charcode_{restored}'] = decoded
+                    restored += 1
+            except:
+                continue
+        
+        return {'source': modified, 'constants': constants, 'restored': restored, 'error': None}
+    
+    @staticmethod
+    def _deserialize_generic(source: str) -> Dict[str, Any]:
+        """Generic heuristic deserialization for unknown protectors."""
+        constants = {}
+        restored = 0
+        modified = source
+        
+        # Find numeric byte arrays that could be strings
+        pattern = re.compile(r'\{\s*(\d{2,3}\s*,\s*){3,}\d{2,3}\s*\}')
+        for match in pattern.finditer(source):
+            try:
+                nums = [int(n) for n in re.findall(r'\d+', match.group(0))]
+                printable = [b for b in nums if 32 <= b <= 126]
+                if len(printable) > 3:
+                    decoded = bytes(printable).decode('latin-1')
+                    constants[f'generic_{restored}'] = decoded
+                    restored += 1
+                    modified = modified.replace(match.group(0), f'"{decoded}"')
+            except:
+                continue
+        
+        return {'source': modified, 'constants': constants, 'restored': restored, 'error': None}
+
+
+# ======================================================================
+# LAYER 3: DE-VIRTUALIZATION & CONTROL FLOW UNFLATTENING
+# ======================================================================
+
+class Layer3DeVirtualizer:
+    """
+    Strips anti-decompiler tricks and simplifies VM dispatch loops.
+    Removes dead code, garbage tables, empty comments, and unrolls
+    flattened control flow.
+    """
+    
+    @staticmethod
+    def de_virtualize(source: str) -> Dict[str, Any]:
+        """
+        Run de-virtualization passes on the source.
+        
+        Args:
+            source: Partially deobfuscated Lua source
+            
+        Returns:
+            Dict with cleaned source, statistics
+        """
+        modified = source
+        dead_code_removed = 0
+        loops_simplified = 0
+        error = None
+        
+        try:
+            # --- Pass 1: Remove nested empty comments ---
+            orig_len = len(modified)
+            modified = re.sub(r'--\[\[[\s]*\]\]', '', modified)
+            modified = re.sub(r'--\[\[[\s]*--[\s]*\]\]', '', modified)
+            dead_code_removed += orig_len - len(modified)
+            
+            # --- Pass 2: Remove dead-code blocks ---
+            # if true then (always executes - strip wrapper)
+            modified = re.sub(r'if\s+true\s+then\s*', '', modified)
+            modified = re.sub(r'\s*end\s*--\s*dead\s+code', '', modified)
+            
+            # if false then ... end (never executes)
+            orig_len = len(modified)
+            modified = re.sub(
+                r'if\s+false\s+then[\s\S]*?end\s*', 
+                '', 
+                modified
+            )
+            dead_code_removed += orig_len - len(modified)
+            
+            # if X == Y then (evaluate constant conditions)
+            def resolve_constant_if(match):
+                body = match.group(1)
+                condition = re.match(
+                    r'if\s+(\d+)\s*==\s*(\d+)\s*then', match.group(0)
+                )
+                if condition:
+                    a, b = int(condition.group(1)), int(condition.group(2))
+                    if a == b:
+                        return body.strip()  # Always true - unwrap
+                    else:
+                        return ''  # Always false - remove
+                return match.group(0)
+            
+            modified = re.sub(
+                r'if\s+\d+\s*==\s*\d+\s*then\s*([\s\S]*?)end\s*',
+                resolve_constant_if,
+                modified
+            )
+            
+            # --- Pass 3: Remove garbage table injections ---
+            orig_len = len(modified)
+            garbage_pattern = re.compile(
+                r"""\[\s*['"][\w]+['"]\s*\]\s*=\s*\{[^}]*\{[^}]*\}[^}]*\},?\s*"""
+            )
+            modified = garbage_pattern.sub('', modified)
+            dead_code_removed += orig_len - len(modified)
+            
+            # --- Pass 4: Simplify while-true dispatch loops ---
+            def unroll_dispatch(match):
+                body = match.group(1)
+                # Check if this is a dispatch loop
+                state_matches = re.findall(r'(\w+)\s*==\s*(\d+)', body)
+                if len(state_matches) > 3:
+                    # Extract state transitions
+                    transitions = []
+                    state_pattern = re.compile(
+                        r'(\w+)\s*==\s*(\d+)\s*then\s*([\s\S]*?)(?=elseif|\s*end)'
+                    )
+                    for sm in state_pattern.finditer(body):
+                        transitions.append({
+                            'state': int(sm.group(2)),
+                            'var': sm.group(1),
+                            'code': sm.group(3).strip()
+                        })
+                    
+                    if transitions:
+                        # Sort by state number
+                        transitions.sort(key=lambda t: t['state'])
+                        # Unroll
+                        parts = []
+                        for t in transitions:
+                            clean_code = re.sub(
+                                re.escape(t['var']) + r'\s*=\s*\d+\s*',
+                                '',
+                                t['code']
+                            )
+                            clean_code = re.sub(r'\bbreak\b', '', clean_code)
+                            parts.append(f"-- [[ State {t['state']} ]]\n{clean_code}")
+                        return '\n'.join(parts)
+                return match.group(0)
+            
+            while_pattern = re.compile(
+                r'while\s+(?:true|1)\s+do\s*([\s\S]*?)end\s*'
+            )
+            modified = while_pattern.sub(unroll_dispatch, modified)
+            
+            # Count simplified loops
+            loops_simplified = len(re.findall(
+                r'-- \[\[ State \d+ \]\]', modified
+            ))
+            
+            # --- Pass 5: Inline short proxy functions ---
+            # local f = function(x) return x end
+            proxy_pattern = re.compile(
+                r'local\s+(\w+)\s*=\s*function\s*\((\w+)\)\s*return\s*\2\s*end\s*'
+            )
+            proxies = {}
+            for pm in proxy_pattern.finditer(modified):
+                proxies[pm.group(1)] = pm.group(2)
+            
+            # Remove proxy definitions
+            modified = proxy_pattern.sub('', modified)
+            
+            # Replace proxy calls
+            for fn_name, param_name in proxies.items():
+                call_pattern = re.compile(
+                    re.escape(fn_name) + r'\s*\(\s*([^)]+)\s*\)'
+                )
+                modified = call_pattern.sub(r'\1', modified)
+            
+            # --- Pass 6: Remove while false do ... end ---
+            modified = re.sub(r'while\s+false\s+do[\s\S]*?end\s*', '', modified)
+            
+            # Remove unreachable after unconditional returns
+            # (Simplified - full analysis would need AST)
+            
+        except Exception as e:
+            error = str(e)
+        
+        return {
+            'source': modified,
+            'dead_code_removed': dead_code_removed,
+            'loops_simplified': loops_simplified,
+            'error': error
+        }
+
+
+# ======================================================================
+# LAYER 4: CODE FORMATTING & REPORTING
+# ======================================================================
+
+class Layer4Formatter:
+    """
+    Beautifies Lua source and prepends a detailed analysis report header.
+    """
+    
+    @staticmethod
+    def format(
+        source: str,
+        identification: Dict,
+        deserialization: Dict,
+        devirtualization: Dict
+    ) -> str:
+        """
+        Format deobfuscated source with header report.
+        
+        Args:
+            source: Deobfuscated source code
+            identification: Layer 1 results
+            deserialization: Layer 2 results
+            devirtualization: Layer 3 results
+            
+        Returns:
+            Formatted output with header
+        """
+        beautified = source
+        
+        try:
+            beautified = Layer4Formatter._beautify_lua(beautified)
+        except Exception:
+            pass  # Use original if beautification fails
+        
+        header = Layer4Formatter._build_header(
+            identification, deserialization, devirtualization
+        )
+        
+        return header + '\n' + beautified
+    
+    @staticmethod
+    def _build_header(
+        identification: Dict,
+        deserialization: Dict,
+        devirtualization: Dict
+    ) -> str:
+        """Build ASCII analysis report header."""
+        sep = '=' * 72
+        
+        details = identification.get('details', {})
+        scores_str = json.dumps({
+            k: v['score'] for k, v in details.items()
+        }) if details else 'N/A'
+        
+        const_count = len(deserialization.get('constants', {}))
+        
+        header = f"""{sep}
+  LUA STATIC ANALYSIS & DEOBFUSCATION REPORT
+{sep}
+
+  Protector Detected  : {identification.get('protector', 'Unknown')}
+  Confidence          : {identification.get('confidence', 0)}%
+
+  -- Constant Restoration --
+  Constants Decrypted : {deserialization.get('restored', 0)}
+  Constants Map Size  : {const_count}
+  Errors              : {deserialization.get('error', 'None')}
+
+  -- Control Flow Unflattening --
+  Dead Code Removed   : {devirtualization.get('dead_code_removed', 0)} bytes
+  Loops Simplified    : {devirtualization.get('loops_simplified', 0)}
+  Errors              : {devirtualization.get('error', 'None')}
+
+  -- Layer Details --
+  L1 (Identification) : {scores_str}
+  L2 (Deserialization): {'Map with ' + str(const_count) + ' entries' if const_count > 0 else 'None'}
+  L3 (De-virtualize)  : {'{:,} bytes removed, {} loops'.format(
+      devirtualization.get('dead_code_removed', 0),
+      devirtualization.get('loops_simplified', 0)
+  )}
+
+{sep}
+  Generated by Lua Static Analysis Engine (Educational)
+{sep}"""
+        return header
+    
+    @staticmethod
+    def _beautify_lua(source: str) -> str:
+        """Basic Lua source beautification with proper indentation."""
+        s = source
+        
+        # Normalize line endings
+        s = s.replace('\r\n', '\n')
+        
+        # Remove excessive blank lines (more than 2 consecutive)
+        s = re.sub(r'\n{3,}', '\n\n', s)
+        
+        # Ensure proper spacing around operators (basic)
+        s = re.sub(r'\s*=\s*', ' = ', s)
+        s = re.sub(r'\s*\+\s*', ' + ', s)
+        s = re.sub(r'\s*-\s*', ' - ', s)
+        s = re.sub(r'\s*\*\s*', ' * ', s)
+        
+        # Ensure proper spacing after commas
+        s = re.sub(r',\s*', ', ', s)
+        
+        # Handle indentation
+        lines = s.split('\n')
+        indent_level = 0
+        beautified_lines = []
+        
+        indent_keywords = (r'\b(then|do)\s*$', r'^else\s*$', r'\bfunction\s*\(')
+        dedent_keywords = (r'^(end|else|elseif|until)\b',)
+        
+        for line in lines:
+            trimmed = line.strip()
+            if not trimmed:
+                beautified_lines.append('')
+                continue
+            
+            # Decrease indent for end, else, elseif, until
+            if any(re.match(pattern, trimmed) for pattern in dedent_keywords):
+                indent_level = max(0, indent_level - 1)
+            
+            indent_str = '  ' * max(0, indent_level)
+            beautified_lines.append(indent_str + trimmed)
+            
+            # Increase indent after then, do, function, else
+            if any(re.search(pattern, trimmed) for pattern in indent_keywords) or \
+               trimmed == 'else':
+                indent_level += 1
+        
+        s = '\n'.join(beautified_lines)
+        
+        # Remove trailing whitespace
+        s = re.sub(r'[ \t]+$', '', s, flags=re.MULTILINE)
+        
+        return s
+
+
+# ======================================================================
+# MAIN ENGINE: ORCHESTRATOR
+# ======================================================================
+
+class LuaDeobfuscationEngine:
+    """
+    Main orchestrator that runs the full 4-layer deobfuscation pipeline.
+    Each layer is wrapped in try-except to prevent full system crashes.
+    """
+    
+    @staticmethod
+    def run(raw_source: str) -> Dict[str, Any]:
+        """
+        Execute the complete deobfuscation pipeline.
+        
+        Args:
+            raw_source: Raw Lua script source code
+            
+        Returns:
+            Dict with success flag, output string, and logs
+        """
+        logger = Logger()
+        current_source = raw_source
+        
+        logger.info("=== LUA STATIC ANALYSIS ENGINE START ===")
+        logger.info(f"Input size: {len(raw_source)} bytes")
+        
+        # --- Layer 1: Identification ---
+        logger.info("[L1] Running identification pass...")
+        try:
+            identification = Layer1Identifier.identify(current_source)
+            logger.info(
+                f"[L1] Protector: {identification['protector']} "
+                f"({identification['confidence']}% confidence)"
+            )
+        except Exception as e:
+            logger.error(f"[L1] Identification failed: {e}")
+            identification = {
+                'protector': 'Unknown',
+                'confidence': 0,
+                'details': {}
+            }
+        
+        # --- Layer 2: Deserialization ---
+        logger.info("[L2] Running deserialization pass...")
+        try:
+            deserialization = Layer2Deserializer.deserialize(
+                current_source, identification
+            )
+            logger.info(
+                f"[L2] Constants restored: {deserialization['restored']}"
+            )
+            current_source = deserialization['source']
+        except Exception as e:
+            logger.error(f"[L2] Deserialization failed: {e}")
+            deserialization = {
+                'source': current_source,
+                'constants': {},
+                'restored': 0,
+                'error': str(e)
+            }
+        
+        # --- Layer 3: De-virtualization ---
+        logger.info("[L3] Running de-virtualization pass...")
+        try:
+            devirtualization = Layer3DeVirtualizer.de_virtualize(current_source)
+            logger.info(
+                f"[L3] Dead code removed: "
+                f"{devirtualization['dead_code_removed']} bytes"
+            )
+            logger.info(
+                f"[L3] Loops simplified: "
+                f"{devirtualization['loops_simplified']}"
+            )
+            current_source = devirtualization['source']
+        except Exception as e:
+            logger.error(f"[L3] De-virtualization failed: {e}")
+            devirtualization = {
+                'source': current_source,
+                'dead_code_removed': 0,
+                'loops_simplified': 0,
+                'error': str(e)
+            }
+        
+        # --- Layer 4: Formatting ---
+        logger.info("[L4] Running formatting pass...")
+        try:
+            output = Layer4Formatter.format(
+                current_source,
+                identification,
+                deserialization,
+                devirtualization
+            )
+            logger.info("[L4] Formatting complete")
+        except Exception as e:
+            logger.error(f"[L4] Formatting failed: {e}")
+            output = f"-- [[ L4 Formatting Error: {e} ]]\n" + current_source
+        
+        logger.info("=== ENGINE COMPLETE ===")
+        
+        return {
+            'success': True,
+            'output': output,
+            'logs': logger.get_all()
+        }
+
+
+# ======================================================================
+# COMMAND-LINE ENTRY POINT
+# ======================================================================
+
+def main():
+    """
+    CLI entry point.
+    Usage: python3 thisfile.py < input.lua > output.lua
+    """
+    try:
+        raw_source = sys.stdin.read()
+        result = LuaDeobfuscationEngine.run(raw_source)
+        print(result['output'])
+        print(result['logs'], file=sys.stderr)
+    except KeyboardInterrupt:
+        sys.exit(1)
+    except Exception as e:
+        print(f"-- [[ Fatal Error: {e} ]] --", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == '__main__':
+    main()
