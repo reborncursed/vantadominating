@@ -7012,7 +7012,7 @@ return ServerHopManager
 end)()
 
 -- main
-(function()
+;(function()
 -- entry point
 
 
